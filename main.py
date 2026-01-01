@@ -1,63 +1,91 @@
 import os
 import uuid
+import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 
-# Load keys from .env
+# 1. SETUP
 load_dotenv()
-
-# Initialize Clients
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
-INDEX_NAME = "similarity-demo"
-MODEL = "text-embedding-3-small"  # Outputs 1536 dimensions
+INDEX_NAME = "interactive-demo"
+MODEL = "text-embedding-3-small"
 
-# Setup Index
 if INDEX_NAME not in pc.list_indexes().names():
-    print(f"Creating index: {INDEX_NAME}...")
     pc.create_index(
         name=INDEX_NAME,
         dimension=1536,
-        metric='cosine',  # Measures the angle between ideas
+        metric='cosine',
         spec=ServerlessSpec(cloud='aws', region='us-east-1')
     )
 
 index = pc.Index(INDEX_NAME)
 
 
-def get_vector(text):
-    """Helper to convert text to embeddings."""
+# 2. THE MATH (UNDER THE HOOD)
+def calculate_manual_similarity(vec1, vec2):
+    """How the computer actually 'compares' two 1536-dimensional points."""
+    v1 = np.array(vec1)
+    v2 = np.array(vec2)
+    # Cosine Similarity Formula: (A · B) / (||A|| * ||B||)
+    dot_product = np.dot(v1, v2)
+    norm_a = np.linalg.norm(v1)
+    norm_b = np.linalg.norm(v2)
+    return dot_product / (norm_a * norm_b)
+
+
+# 3. CORE FUNCTIONS
+def get_embedding(text):
     return client.embeddings.create(input=[text], model=MODEL).data[0].embedding
 
 
-def save_to_database(text):
-    """Saves a string as a vector into Pinecone."""
-    vector = get_vector(text)
-    # Metadata stores the original text so we can read it later
+def add_entry(text):
+    vector = get_embedding(text)
     index.upsert(vectors=[{"id": str(uuid.uuid4()), "values": vector, "metadata": {"text": text}}])
-    print(f"Successfully saved: '{text}'")
+    print(f"\n Entry Saved to Vector DB: '{text}'")
+    return vector
 
 
-def compare_and_search(query_text):
-    """Compares a query to saved vectors and returns proximity."""
-    query_vector = get_vector(query_text)
-    results = index.query(vector=query_vector, top_k=3, include_metadata=True)
+def run_comparison():
+    print("\n--- VECTOR DB INTERACTIVE LAB ---")
+    print("1. Use hardcoded examples (Fruit, Coding, Servers)")
+    print("2. Add your own custom text to the database")
+    choice = input("Select an option (1 or 2): ")
 
-    print(f"\nResults for: '{query_text}'")
-    for match in results['matches']:
-        # Score is 0.0 to 1.0 (1.0 is a perfect semantic match)
-        print(f"--- Closeness Score: {match['score']:.4f} | Text: {match['metadata']['text']}")
+    if choice == '1':
+        examples = ["I love eating fresh green apples.",
+                    "Python is a popular language for data science.",
+                    "The server is currently undergoing maintenance."]
+        for ex in examples: add_entry(ex)
+    else:
+        custom_text = input("Enter the text you want to store in the DB: ")
+        add_entry(custom_text)
+
+    # The Comparison Phase
+    query = input("\nNow, enter a search term to compare against the DB: ")
+    query_vector = get_embedding(query)
+
+    # Query the DB
+    results = index.query(vector=query_vector, top_k=1, include_metadata=True)
+
+    if results['matches']:
+        best_match = results['matches'][0]
+        db_text = best_match['metadata']['text']
+        db_score = best_match['score']
+
+        # Manual verification to show the user the "Work"
+        db_vector = index.fetch([best_match['id']])['vectors'][best_match['id']]['values']
+        manual_score = calculate_manual_similarity(query_vector, db_vector)
+
+        print(f"\n--- RESULTS ---")
+        print(f"Your Query: '{query}'")
+        print(f"Closest Match in DB: '{db_text}'")
+        print(f"Cloud DB Similarity Score: {db_score:.4f}")
+        print(f"Manual Math Verification:  {manual_score:.4f}")
+        print(f"Insight: This is {manual_score * 100:.1f}% semantically similar.")
 
 
-# --- RUNNING THE APP ---
 if __name__ == "__main__":
-    # 1. Add some data to your brain
-    save_to_database("I love eating fresh green apples.")
-    save_to_database("The server is currently undergoing maintenance.")
-    save_to_database("Python is a popular language for data science.")
-
-    # 2. Compare a new search term to your saved data
-    search_term = input("\nEnter a phrase to compare: ")
-    compare_and_search(search_term)
+    run_comparison()
